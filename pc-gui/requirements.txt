@@ -1,0 +1,6 @@
+PySide6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
+pyserial>=3.5
+# optional, for uploading the firmware to the Pico:
+# mpremote>=1.20
