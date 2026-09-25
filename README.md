@@ -9,7 +9,7 @@ actoPulserX4-48V programmable current source driving a 1900 nm LED
 kicad/        shield schematic and PCB (Pico + TLV320ADC6120 + mic connector)
 doc/          datasheets (ADC, microphone, TI analog-input app note)
 firmware/   MicroPython firmware for the Pico
-pc/           PySide6 desktop GUI
+pc-gui/           PySide6 desktop GUI
 ```
 
 ## Wiring
@@ -57,9 +57,21 @@ commands for 5 s, and on any firmware exception.
 ## PC GUI (pc-gui/)
 
 ```
+pc-gui\run_gui.bat
+```
+
+or, with any Python 3.10+ that imports PySide6 cleanly:
+
+```
 pip install -r pc-gui/requirements.txt
 python pc-gui/pa_gui.py
 ```
+
+Note for anaconda users: the anaconda base interpreter fails with
+`DLL load failed while importing QtCore` because its root folder ships MSVC
+runtime 14.44 DLLs that shadow the newer runtime PySide6 6.11 needs. Use the
+python.org interpreter (`py -3.13`, which `run_gui.bat` does), or install
+PySide6 from conda-forge inside a conda environment instead of pip.
 
 What it does:
 
