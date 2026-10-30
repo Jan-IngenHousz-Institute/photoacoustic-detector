@@ -1,0 +1,36 @@
+; modulator.pio - square-wave LED modulation locked to the I2S bit clock.
+;
+; GP0 (set pins) is held high for H bit clocks and low for L bit clocks, counting
+; BCLK rising edges on GP6, so f_mod = 3.072 MHz / (H + L) exactly and the
+; lock-in reference never drifts against the light.
+;
+; Config word (TX FIFO): bits 15..0 = H - 1, bits 31..16 = L - 1. The state
+; machine parks at `pull block` until it is armed by pushing a word; it then
+; clears the frame flag (irq 4, raised by i2s_rx.pio at the start of every
+; right slot) and starts on the next one, so the phase origin is tied to a
+; known sample frame (see modulator.c). A new word pushed while running is
+; taken at the next period (pull noblock), otherwise the old one is reused.
+
+.program mod_square
+.define PUBLIC BCLK_GPIO 6
+
+public entry:
+    pull block                     ; armed: config word in OSR
+    irq clear 4
+    wait 1 irq 4                   ; frame flag of the frame we start in
+.wrap_target
+    mov x, osr                     ; keep the current word for pull noblock
+    out y, 16                      ; Y = H - 1
+    set pins, 1
+high:
+    wait 0 gpio BCLK_GPIO
+    wait 1 gpio BCLK_GPIO          ; one BCLK rising edge
+    jmp y-- high
+    out y, 16                      ; Y = L - 1
+    set pins, 0
+low:
+    wait 0 gpio BCLK_GPIO
+    wait 1 gpio BCLK_GPIO
+    jmp y-- low
+    pull noblock                   ; new word, or OSR <- X
+.wrap

@@ -1,0 +1,6 @@
+PySide6-Essentials>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
+pyserial>=3.5
+# optional, for the summary plot of pa_measure.py:
+# matplotlib>=3.7

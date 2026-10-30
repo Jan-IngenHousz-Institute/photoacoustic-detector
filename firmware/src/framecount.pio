@@ -1,0 +1,23 @@
+; framecount.pio - self-test: count BCLK rising edges while FSYNC is high
+; (one right slot); twice that is the number of bit clocks per I2S frame.
+; jmp pin = FSYNC (GP7), BCLK on GP6. Runs on PIO1 at full system clock.
+; FSYNC is checked at every rising edge before the edge is counted, so the
+; first rising edge after FSYNC falls is not counted.
+
+.program framecount
+.define PUBLIC BCLK_GPIO 6
+.define PUBLIC FSYNC_GPIO 7
+
+    wait 0 gpio FSYNC_GPIO
+    wait 1 gpio FSYNC_GPIO         ; start of the right slot
+    mov x, ~null                   ; X = 0xFFFFFFFF
+count:
+    wait 0 gpio BCLK_GPIO
+    wait 1 gpio BCLK_GPIO          ; a BCLK rising edge
+    jmp pin counted                ; FSYNC still high: it belongs to the right slot
+    jmp done
+counted:
+    jmp x-- count                  ; X -= 1 (never reaches zero)
+done:
+    mov isr, ~x                    ; rising edges counted
+    push

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.vscode/
+firmware/build/
+pc-gui/.venv/
+pc-gui/build/
+pc-gui/dist/
+pc-gui/*.spec
+kicad/*-backups/
+kicad/~*.lck
+kicad/_autosave-*
+
+measurements/*

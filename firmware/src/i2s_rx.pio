@@ -1,0 +1,42 @@
+; i2s_rx.pio - I2S master receiver for the TLV320ADC6120.
+;
+; BCLK (side-set, GP6) and FSYNC (set pins, GP7) are generated here, SDOUT (GP8)
+; is sampled. 25 PIO cycles per bit clock (12 low, 13 high): at 76.8 MHz that is
+; exactly 3.072 MHz, 64 bit clocks per frame (two 32-bit slots), fs = 48000.000 Hz.
+;
+; Standard I2S alignment (datasheet 8.3.1.2.2): the ADC drives FSYNC-relative
+; data on BCLK falling edges, the MSB of a slot in the second bit period after
+; the FSYNC edge. So bit period 0 of a slot carries the LSB of the previous
+; slot and periods 1..31 the bits 31..1 of the current slot. Sampling happens on
+; the rising edge (the pad value is 2 clk_sys cycles old, i.e. ~130 ns after the
+; falling edge that changed it; the ADC needs at most 18 ns).
+;
+; Words are pushed LEFT, RIGHT, LEFT, ... (autopush at 32 bits, RX FIFO joined).
+; The frame flag (PIO irq 4) is raised right after the LEFT word is pushed, at
+; PIO cycle 23 of bit period 32: the modulator starts on it (modulator.pio).
+
+.program i2s_rx_master
+.side_set 1                        ; BCLK
+
+.wrap_target
+    set pins, 0        side 0 [5]  ; LEFT period 0: FSYNC -> 0              6 low
+    set x, 30          side 0 [5]  ;                                        6 low
+    in pins, 1         side 1 [12] ; sample RIGHT bit 0 -> push RIGHT word  13 high
+left_loop:                         ; periods 1..31: LEFT bits 31..1
+    nop                side 0 [11] ; 12 low
+    in pins, 1         side 1 [11] ; 12 high
+    jmp x-- left_loop  side 1      ; 1 high
+    set pins, 1        side 0 [5]  ; RIGHT period 0: FSYNC -> 1
+    set x, 30          side 0 [5]
+    in pins, 1         side 1 [10] ; sample LEFT bit 0 -> push LEFT word    11 high
+    irq nowait 4       side 1 [1]  ; frame flag                             2 high
+right_loop:                        ; periods 33..63: RIGHT bits 31..1
+    nop                side 0 [11]
+    in pins, 1         side 1 [11]
+    jmp x-- right_loop side 1
+.wrap
+
+public entry:                      ; first LEFT period 0 without a sample, so the
+    set pins, 0        side 0 [5]  ; first word pushed is a LEFT word
+    set x, 30          side 0 [5]
+    jmp left_loop      side 1 [12]
