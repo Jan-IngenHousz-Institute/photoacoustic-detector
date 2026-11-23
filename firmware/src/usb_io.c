@@ -106,13 +106,20 @@ static void host_gone(void) {
     modulator_off();
     app.light = false;
     head = tail = 0;                    /* stale stream is useless to the next client */
+    tud_cdc_write_clear();              /* and so is what the old host never read: the next one must
+                                           not receive the tail of a burst glued to its first reply */
+    tud_cdc_read_flush();
     rx_len = 0;
     rx_overflow = false;
 }
 
 void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts) {
     (void)itf; (void)rts;
-    if (!dtr) host_gone();
+    if (!dtr) {
+        host_gone();
+    } else {
+        usb_send("\n", 1, USB_MSG_CTRL);  /* new host: terminate anything left unfinished */
+    }
 }
 
 void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *p) {

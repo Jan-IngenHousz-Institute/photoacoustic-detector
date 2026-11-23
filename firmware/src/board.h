@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define FW_NAME         "pa-detector"
-#define FW_VERSION      "1.0.0"
+#define FW_VERSION      "1.0.1"
 #define PROTO_VERSION   2
 
 /* ---- pin map (kicad/photoacoustic-detector) ---------------------------- */

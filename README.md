@@ -39,7 +39,7 @@ also stays off while the Pico is in reset or in the bootloader.
 It enumerates as **pa-detector**, a USB serial port (Windows `COMx`, Linux
 `/dev/ttyACMx`, macOS `/dev/cu.usbmodem*`). No driver is needed. If a drive
 called `RPI-RP2` appears instead, the Pico is in its bootloader: copy
-`firmware/release/pa_detector-1.0.0.uf2` onto that drive and it restarts as
+`firmware/release/pa_detector-1.0.1.uf2` onto that drive and it restarts as
 the detector (see "Updating the firmware").
 
 ### 3. Install and start the GUI
@@ -69,7 +69,7 @@ the versions, useful to verify an installation.
 ### 4. First measurement
 
 1. Choose the port marked `[pa-detector]` and press **Connect**. The console
-   reports `firmware pa-detector 1.0.0` and a status line; the indicators
+   reports `firmware pa-detector 1.0.1` and a status line; the indicators
    for Pico, firmware, ADC, clock and modulator turn green.
 2. Press **Self-test...** and **Run device self-test**. Every entry should
    pass; `mic_noise_floor` reads about -80 to -85 dBFS at 12 dB gain in a
@@ -134,7 +134,7 @@ odd harmonics, phase spread between light cycles), the spectra, and a
 
 ## Updating the firmware
 
-The tested image is `firmware/release/pa_detector-1.0.0.uf2` (also inside
+The tested image is `firmware/release/pa_detector-1.0.1.uf2` (also inside
 the standalone zip).
 
 1. Get the Pico into its bootloader: with the GUI connected press
@@ -200,7 +200,7 @@ into `pc-gui\dist\PhotoacousticDetector\` and zips it as
 included). Publish it together with the firmware image:
 
 ```
-gh release create v1.0.0 pc-gui/dist/PhotoacousticDetector-windows.zip firmware/release/pa_detector-1.0.0.uf2
+gh release create v1.0.1 pc-gui/dist/PhotoacousticDetector-windows.zip firmware/release/pa_detector-1.0.1.uf2
 ```
 
 ## Legacy

@@ -40,7 +40,7 @@ add_executable(pa_detector
 )
 
 pico_set_program_name(pa_detector "pa-detector")
-pico_set_program_version(pa_detector "1.0.0")
+pico_set_program_version(pa_detector "1.0.1")
 
 pico_generate_pio_header(pa_detector ${CMAKE_CURRENT_LIST_DIR}/src/i2s_rx.pio)
 pico_generate_pio_header(pa_detector ${CMAKE_CURRENT_LIST_DIR}/src/modulator.pio)
