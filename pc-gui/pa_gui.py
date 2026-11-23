@@ -538,7 +538,9 @@ class MainWindow(QMainWindow):
         self.plot_spec.showGrid(x=True, y=True, alpha=0.3)
         self.plot_spec.setDownsampling(auto=True, mode="peak")
         self.plot_spec.setClipToView(True)
+        self.plot_spec.disableAutoRange()               # fixed axes: 0..20 kHz, -150..0 dBFS (mouse zoom still works)
         self.curve_spec = self.plot_spec.plot(pen=pg.mkPen("#1565c0", width=1))
+        self.set_spec_range(logx=False)
         self.spec_markers = []
         v.addWidget(self.plot_spec)
         return w
@@ -644,6 +646,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Connection failed", str(e))
             return
         self.fw = None
+        self.id_retries = 0
         set_led(self.led_fw, "?")
         self.id_timer.start(3000)
         self.log("connected to %s, waiting for firmware id..." % port)
@@ -660,10 +663,16 @@ class MainWindow(QMainWindow):
                 self.abort_sweep("disconnected")
 
     def on_no_id(self):
-        if self.dev.is_open() and self.fw is None:
-            self.log("no firmware answer: flash firmware/build/pa_detector.uf2 (hold BOOTSEL while plugging in, "
-                     "copy the UF2 to the RPI-RP2 drive; see README)", "#c62828")
-            set_led(self.led_fw, "fail")
+        if not self.dev.is_open() or self.fw is not None:
+            return
+        self.id_retries = getattr(self, "id_retries", 0) + 1
+        if self.id_retries <= 3:            # the first reply can be lost in a torn line from an old session
+            self.dev.send("id")
+            self.id_timer.start(2000)
+            return
+        self.log("no firmware answer: flash pa_detector-<version>.uf2 (Tools > Update firmware..., or hold "
+                 "BOOTSEL while plugging in and copy the UF2 to the RPI-RP2 drive; see README)", "#c62828")
+        set_led(self.led_fw, "fail")
 
     def on_ident(self, msg):
         self.fw = msg
@@ -926,7 +935,15 @@ class MainWindow(QMainWindow):
         if self.chk_zoom.isChecked():
             self.plot_spec.setXRange(xpos(max(f[1], fmod - 500)), xpos(fmod + 500), padding=0)
         elif rescale:
-            self.plot_spec.enableAutoRange(axis="x")
+            self.set_spec_range(logx)
+
+    def set_spec_range(self, logx):
+        """Default spectrum axes: 0 .. 20 kHz (20 Hz .. 20 kHz on a log axis), -150 .. 0 dBFS."""
+        if logx:
+            self.plot_spec.setXRange(math.log10(20.0), math.log10(20000.0), padding=0)
+        else:
+            self.plot_spec.setXRange(0.0, 20000.0, padding=0)
+        self.plot_spec.setYRange(-150.0, 0.0, padding=0)
 
     def export_spectrum(self):
         if self.spec_db is None:

@@ -81,6 +81,10 @@ class PADevice(QObject):
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
         self.connected.emit(True)
+        try:
+            self.ser.write(b"\n")       # end any partial line a previous session left on the wire
+        except (serial.SerialException, OSError):
+            pass
         self.send("id")
 
     def close(self):
