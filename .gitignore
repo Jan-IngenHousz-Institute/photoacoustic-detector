@@ -6,8 +6,12 @@ pc-gui/.venv/
 pc-gui/build/
 pc-gui/dist/
 pc-gui/*.spec
-kicad/*-backups/
-kicad/~*.lck
-kicad/_autosave-*
+kicad/**/*-backups/
+kicad/**/~*.lck
+kicad/**/_autosave-*
 
 measurements/*
+# KiCad v2 work files
+kicad/photoacoustic-detector-v2/**/*.kicad_prl
+kicad/photoacoustic-detector-v2/**/fp-info-cache
+kicad/photoacoustic-detector-v2/out/
