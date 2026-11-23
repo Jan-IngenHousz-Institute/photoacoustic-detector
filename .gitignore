@@ -9,9 +9,14 @@ pc-gui/*.spec
 kicad/**/*-backups/
 kicad/**/~*.lck
 kicad/**/_autosave-*
+firmware/build-pico2
 
 measurements/*
 # KiCad v2 work files
 kicad/photoacoustic-detector-v2/**/*.kicad_prl
 kicad/photoacoustic-detector-v2/**/fp-info-cache
 kicad/photoacoustic-detector-v2/out/
+
+# temporary v2 files
+kicad/photoacoustic-detector-v2
+doc/hw-v2-plan.md
