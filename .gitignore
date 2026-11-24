@@ -20,3 +20,5 @@ kicad/photoacoustic-detector-v2/out/
 # temporary v2 files
 kicad/photoacoustic-detector-v2
 doc/hw-v2-plan.md
+# recorded sweeps, created where the GUI is launched
+photoacoustic-data/

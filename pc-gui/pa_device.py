@@ -4,7 +4,8 @@ pa_device.py - serial link to the photoacoustic detector firmware (firmware/).
 Discovers Picos (USB VID 0x2E8A; PID 0x000A is the detector firmware), detects
 a Pico left in BOOTSEL mode (RPI-RP2 drive), and runs a reader thread that
 turns the firmware's JSON lines into Qt signals. Commands are plain text lines,
-see firmware/src/protocol.c.
+see firmware/src/protocol.c. With pa_sim.enable() the list also offers the
+simulated detector "SIM" (pa_sim.py), which open() connects to instead of a serial port.
 """
 
 import base64
@@ -17,6 +18,8 @@ import numpy as np
 import serial
 import serial.tools.list_ports
 from PySide6.QtCore import QObject, Signal
+
+import pa_sim
 
 PICO_VID = 0x2E8A
 PA_DETECTOR_PID = 0x000A        # firmware/ (Pico SDK CDC): the detector firmware
@@ -32,6 +35,8 @@ def list_ports():
         is_mpy = is_pico and p.pid == MICROPYTHON_PID
         out.append((p.device, p.description or "", is_pico, is_fw, is_mpy))
     out.sort(key=lambda t: (not t[3], not t[4], not t[2], t[0]))
+    if pa_sim.enabled:
+        out.insert(0, (pa_sim.PORT, "simulated detector (no hardware)", True, True, False))
     return out
 
 
@@ -75,7 +80,10 @@ class PADevice(QObject):
     # ---- connection ---------------------------------------------------------
     def open(self, port, baud=115200):
         self.close()
-        self.ser = serial.Serial(port, baud, timeout=0.2, write_timeout=1.0)
+        if pa_sim.is_sim_port(port):
+            self.ser = pa_sim.SimSerial(port)
+        else:
+            self.ser = serial.Serial(port, baud, timeout=0.2, write_timeout=1.0)
         self.port = port
         self._stop.clear()
         self._thread = threading.Thread(target=self._reader, daemon=True)

@@ -2,20 +2,24 @@
 pa_gui.py - desktop GUI for the photoacoustic detector (Pico + TLV320ADC6120 shield
 + LED current source on GP0).
 
-    python pa_gui.py
+    python pa_gui.py            the detector on a USB serial port
+    python pa_gui.py --sim      also offers a simulated detector ("SIM", pa_sim.py), no hardware needed
 
 Features: Pico discovery (incl. BOOTSEL detection), firmware handshake, layered
 self-test, LED modulation 200 Hz - 10 kHz, FFT of the microphone stream (up to
 5 s long, power averaged) with harmonic markers and SNR, lock-in amplitude/phase
 strip charts with averaging and dark subtraction, time-domain and
-pulse-synchronous views, frequency sweep, CSV logging with full settings
-context, config save/load, heartbeat safety.
+pulse-synchronous views, frequency sweep, recorded sweeps (one .txt with the
+metadata, the raw blocks and samples and the analysed amplitude and phase, in
+the photoacoustic-data folder, see pa_record.py), CSV logging with full
+settings context, config save/load, heartbeat safety.
 """
 
 import csv
 import json
 import math
 import os
+import platform
 import sys
 import time
 from collections import deque
@@ -23,14 +27,14 @@ from collections import deque
 try:
     import numpy as np
     import pyqtgraph as pg
-    from PySide6.QtCore import Qt, QTimer, QSettings
-    from PySide6.QtGui import QFont, QColor
+    from PySide6.QtCore import Qt, QTimer, QSettings, QUrl
+    from PySide6.QtGui import QFont, QColor, QDesktopServices
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox,
         QDoubleSpinBox, QSpinBox, QCheckBox, QGroupBox, QFormLayout, QVBoxLayout,
         QHBoxLayout, QTabWidget, QPlainTextEdit, QFileDialog, QMessageBox, QDialog,
         QTableWidget, QTableWidgetItem, QLineEdit, QSplitter, QScrollArea, QHeaderView,
-        QSizePolicy,
+        QSizePolicy, QInputDialog,
     )
 except ImportError as _e:
     _conda = "conda" in sys.prefix.lower() or "conda" in getattr(sys, "base_prefix", "").lower()
@@ -46,11 +50,15 @@ except ImportError as _e:
     sys.exit(1)
 
 import pa_limits
+import pa_record
+import pa_sim
 from pa_device import PADevice, list_ports, find_bootsel_drive
 
 pg.setConfigOptions(antialias=False, background="w", foreground="k")
 
+GUI_VERSION = "1.1.0"
 HISTORY_S = 120
+RECORD_WRITE_DELAY_MS = 500         # the last block's raw samples follow its data line
 BURST_EVERY = 1                     # raw block every 100 ms: gap-free stream for the FFT
 FFT_LENGTHS_S = (0.1, 0.5, 1.0, 2.0, 5.0)
 FFT_MAX_AVG = 64
@@ -73,13 +81,16 @@ def set_led(lab, state):
 
 
 class Sequence:
-    """Runs a list of (callable, blocks_to_wait) steps driven by incoming data blocks."""
+    """Runs a list of (callable, blocks_to_wait[, accept]) steps driven by incoming data blocks. With
+    accept(msg), only the blocks it accepts count (and are collected): a block measured before a setting
+    took effect, but received after the command was sent, is skipped."""
 
     def __init__(self, steps, on_done, collect=None):
         self.steps = list(steps)
         self.on_done = on_done
         self.collect = collect          # callable(msg) storing values while waiting
         self.remaining = 0
+        self.accept = None
         self.active = False
 
     def start(self):
@@ -91,12 +102,16 @@ class Sequence:
             self.active = False
             self.on_done()
             return
-        fn, n = self.steps.pop(0)
+        step = self.steps.pop(0)
+        fn, n = step[:2]
+        self.accept = step[2] if len(step) > 2 else None
         fn()
         self.remaining = n
 
     def feed(self, msg):
         if not self.active:
+            return
+        if self.accept is not None and self.remaining > 0 and not self.accept(msg):
             return
         if self.remaining > 0:
             if self.collect:
@@ -155,9 +170,10 @@ class SelfTestDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Photoacoustic detector")
+        self.setWindowTitle("Photoacoustic detector  -  GUI %s" % GUI_VERSION)
         self.resize(1400, 860)
         self.settings = QSettings("JII", "pa-detector")
+        self.data_dir, data_dir_moved = pa_record.data_folder()
         self.cal = pa_limits.Calibration()
         self.dev = PADevice()
         self.fw = None
@@ -194,6 +210,9 @@ class MainWindow(QMainWindow):
         self.sweep_result = []
         self.sweep_collect = []
         self.sweep_freq_backup = None
+        self.sweep_stale = 0                # blocks still at the old frequency after a sweep step
+        self.record = None                  # pa_record.SweepRecord of the sweep being recorded
+        self.last_status = None
         self.check_seq = None
         self.check_vals = {"off": [], "on": []}
         self.log_file = None
@@ -205,6 +224,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_device_signals()
+        self.log("GUI %s, data folder %s" % (GUI_VERSION, self.data_dir))
+        if data_dir_moved:
+            self.log("the launch folder cannot be written: recorded sweeps go to %s" % self.data_dir, "#ef6c00")
         self.refresh_ports()
         self.set_mod_freq(*pa_limits.snap_frequency(self.freq_spin.value()))
 
@@ -392,9 +414,19 @@ class MainWindow(QMainWindow):
         self.sweep_blocks.setValue(10)
         self.sweep_blocks.setSuffix(" blocks / step")
         f.addRow("Average", self.sweep_blocks)
+        row = QHBoxLayout()
         self.btn_sweep = QPushButton("Run sweep")
         self.btn_sweep.clicked.connect(self.toggle_sweep)
-        f.addRow(self.btn_sweep)
+        self.btn_record = QPushButton("Record sweep...")
+        self.btn_record.setStyleSheet("QPushButton{font-weight:bold}")
+        self.btn_record.setToolTip(
+            "Asks for a name, runs the sweep and saves <name>.txt in the data folder: a header with the "
+            "settings and the device information, the analysed amplitude and phase per frequency, every "
+            "averaged 100 ms block and its raw microphone samples")
+        self.btn_record.clicked.connect(self.record_sweep)
+        row.addWidget(self.btn_sweep)
+        row.addWidget(self.btn_record)
+        f.addRow(row)
         self.sweep_label = QLabel("")
         f.addRow(self.sweep_label)
         return g
@@ -419,10 +451,20 @@ class MainWindow(QMainWindow):
         return g
 
     def _group_logging(self):
-        g = QGroupBox("Logging")
+        g = QGroupBox("Data and logging")
         f = QFormLayout(g)
         row = QHBoxLayout()
-        self.log_path = QLineEdit(os.path.join(os.getcwd(), "pa_log_%s.csv" % time.strftime("%Y%m%d_%H%M%S")))
+        self.data_dir_label = QLabel(self.data_dir)
+        self.data_dir_label.setWordWrap(True)
+        self.data_dir_label.setToolTip("Recorded sweeps, logs and exports are saved here")
+        self.btn_open_data = QPushButton("Open")
+        self.btn_open_data.setMaximumWidth(50)
+        self.btn_open_data.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.data_dir)))
+        row.addWidget(self.data_dir_label, 1)
+        row.addWidget(self.btn_open_data)
+        f.addRow("Data folder", row)
+        row = QHBoxLayout()
+        self.log_path = QLineEdit(os.path.join(self.data_dir, "pa_log_%s.csv" % time.strftime("%Y%m%d_%H%M%S")))
         self.btn_browse = QPushButton("...")
         self.btn_browse.setMaximumWidth(30)
         self.btn_browse.clicked.connect(self.browse_log)
@@ -703,6 +745,9 @@ class MainWindow(QMainWindow):
         self.reset_fft()
 
     def on_status(self, msg):
+        self.last_status = msg
+        if self.record is not None and not self.record.written:
+            self.record.status_msgs.append(msg)
         adc = msg.get("adc", {})
         set_led(self.led_clk, "pass" if adc.get("clock_ok") else "fail")
         self.show_light(bool(msg.get("light")))
@@ -857,6 +902,8 @@ class MainWindow(QMainWindow):
             self.rate_ref = (msg["t"], msg["seq"])
 
     def on_burst(self, samples, meta):
+        if self.record is not None:
+            self.record.add_burst(samples, meta)
         x = samples.astype(np.float64) / 32768.0
         fs = meta.get("fs", pa_limits.FS)
         self.last_burst = (x, meta)
@@ -948,7 +995,8 @@ class MainWindow(QMainWindow):
     def export_spectrum(self):
         if self.spec_db is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export FFT", "fft.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export FFT", os.path.join(self.data_dir, "fft.csv"),
+                                              "CSV (*.csv)")
         if not path:
             return
         k = min(self.fft_avg.value(), len(self.fft_frames))
@@ -1014,44 +1062,180 @@ class MainWindow(QMainWindow):
         self.seq_expected = None
 
     # -------------------------------------------------------------- sweep -----
+    def sweep_plan(self):
+        log = self.chk_sweep_log.isChecked()
+        return pa_limits.sweep_frequencies(self.sweep_from.value(), self.sweep_to.value(),
+                                           self.sweep_points.value(), log), log
+
+    def update_sweep_buttons(self):
+        self.btn_sweep.setText("Abort sweep" if self.sweep else "Run sweep")
+        self.btn_record.setEnabled(self.sweep is None and self.record is None)
+
     def toggle_sweep(self):
         if self.sweep:
             self.abort_sweep("aborted by user")
             return
+        if self.record is None:
+            self.start_sweep()
+
+    def record_sweep(self):
+        """Ask for a name, then run the sweep and save it as <name>.txt in the data folder."""
+        if self.sweep or self.record is not None:
+            return
         if not self.dev.is_open() or not self.fw:
             QMessageBox.warning(self, "Not connected", "Connect to the device first.")
             return
-        log = self.chk_sweep_log.isChecked()
-        freqs = pa_limits.sweep_frequencies(self.sweep_from.value(), self.sweep_to.value(),
-                                            self.sweep_points.value(), log)
+        freqs = self.sweep_plan()[0]
         if len(freqs) < 2:
             QMessageBox.warning(self, "Sweep", "Choose a wider range.")
             return
+        size_mb = len(freqs) * self.sweep_blocks.value() * pa_limits.BLOCK * 6.2e-6   # ~6 characters per sample
+        if size_mb > 200:
+            ans = QMessageBox.question(self, "Record sweep",
+                                       "%d frequencies x %d blocks: the record will be about %.0f MB of text "
+                                       "(raw samples included).\n\nRecord anyway?" % (
+                                           len(freqs), self.sweep_blocks.value(), size_mb))
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        if not self.light_on:
+            ans = QMessageBox.question(self, "Record sweep",
+                                       "The modulation is OFF: the sweep would record the cell without light "
+                                       "(a dark sweep).\n\nRecord anyway?")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+        target = self.ask_record_name()
+        if target:
+            self.start_sweep(record=target)
+
+    def ask_record_name(self):
+        """(name, path) for a new record, or None if cancelled."""
+        text = ""
+        while True:
+            text, ok = QInputDialog.getText(
+                self, "Record sweep", "Name of the record. It is saved as <name>.txt in\n%s" % self.data_dir,
+                QLineEdit.EchoMode.Normal, text)
+            if not ok:
+                return None
+            name = pa_record.clean_name(text)
+            if not name:
+                QMessageBox.warning(self, "Record sweep", "Type a name for the record.")
+                continue
+            path = os.path.join(self.data_dir, name + ".txt")
+            if os.path.exists(path):
+                ans = QMessageBox.question(self, "Record sweep",
+                                           "%s.txt already exists in the data folder.\n\nReplace it?" % name)
+                if ans != QMessageBox.StandardButton.Yes:
+                    continue
+            return name, path
+
+    def record_metadata(self, freqs, log):
+        """Header sections of a record: everything known about the device and the settings at the start."""
+        from PySide6 import __version__ as pyside_version
+        fw = {k: v for k, v in (self.fw or {}).items() if k != "type"}
+        dark = "none"
+        if self.z_dark is not None:
+            dark = "%.3f dBFS at %+.2f deg, taken at %.4f Hz; not subtracted in this record" % (
+                pa_limits.dbfs(abs(self.z_dark)), math.degrees(np.angle(self.z_dark)),
+                pa_limits.snap_frequency(self.freq_spin.value())[1] if self.dark_p is None
+                else pa_limits.BCLK_PER_FRAME * pa_limits.FS / self.dark_p)
+        return [
+            ("software", [
+                ("gui", "pa_gui %s" % GUI_VERSION), ("standalone_build", bool(getattr(sys, "frozen", False))),
+                ("python", platform.python_version()), ("pyside6", pyside_version), ("pyqtgraph", pg.__version__),
+                ("numpy", np.__version__), ("os", platform.platform())]),
+            ("device", [("port", self.dev.port)] + [("firmware." + k, v) for k, v in fw.items()]),
+            ("sweep", [
+                ("from_hz", self.sweep_from.value()), ("to_hz", self.sweep_to.value()),
+                ("points_requested", self.sweep_points.value()), ("spacing", "log" if log else "linear"),
+                ("frequencies_planned", len(freqs)), ("frequencies_hz", ["%.4f" % f for f in freqs]),
+                ("settle_blocks", self.sweep_settle.value()), ("average_blocks", self.sweep_blocks.value()),
+                ("block_s", pa_limits.BLOCK / pa_limits.FS),
+                ("averaging", "vector (complex) mean of the lock-in results of the averaged blocks; the blocks "
+                              "seen while a step settled are not recorded")]),
+            ("measurement", [
+                ("adc_gain_db", self.gain_spin.value()), ("modulation_on_at_start", self.light_on),
+                ("modulation_hz_before_sweep", self.freq_actual), ("dark_reference", dark)]),
+            ("calibration", [
+                ("mic_sensitivity_dbv_pa", self.cal.mic_sens_dbv_pa),
+                ("adc_full_scale_vrms_at_0db", self.cal.adc_fs_vrms),
+                ("mpa_peak_from_fs", "amp_fs * adc_full_scale_vrms * sqrt(2) / 10^(adc_gain_db / 20) "
+                                     "/ 10^(mic_sensitivity_dbv_pa / 20) * 1000")]),
+            ("definitions", [
+                ("amplitude", "sine peak at the modulation frequency as a fraction of the ADC full scale "
+                              "(1 = 0 dBFS = 2 Vrms differential at 0 dB gain): the sweep's gain curve"),
+                ("phase", "lag of the microphone signal behind the LED rising edge, as seen at the ADC output; "
+                          "for the physical response subtract the ADC group delay, "
+                          "360 * f * firmware.adc_latency_samples / firmware.fs degrees, and the high-pass "
+                          "filter's lead, atan(firmware.hpf_hz / f) (README, Reading the numbers)")]),
+            ("gui settings", self.config_dict()),
+        ]
+
+    def start_sweep(self, record=None):
+        """Run the sweep; with record = (name, path) also record it."""
+        if not self.dev.is_open() or not self.fw:
+            QMessageBox.warning(self, "Not connected", "Connect to the device first.")
+            return False
+        freqs, log = self.sweep_plan()
+        if len(freqs) < 2:
+            QMessageBox.warning(self, "Sweep", "Choose a wider range.")
+            return False
         for p in (self.plot_sweep, self.plot_sweep_ph):
             p.setLogMode(x=log, y=False)
         self.sweep_freq_backup = self.freq_spin.value()
         self.sweep_result = []
+        if record:
+            self.record = pa_record.SweepRecord(record[0], record[1], self.record_metadata(freqs, log), self.cal)
+            self.dev.send("status")             # device status at the start, for the header
         settle, nblk = self.sweep_settle.value(), self.sweep_blocks.value()
         steps = []
         for f in freqs:
-            steps.append((lambda f=f: self._sweep_set_freq(f), settle))
-            steps.append((lambda: self.sweep_collect.clear(), nblk))
+            at_f = lambda m, f=f: self._sweep_at_freq(m, f)
+            steps.append((lambda f=f: self._sweep_set_freq(f), settle, at_f))
+            steps.append((self._sweep_begin_average, nblk, at_f))
             steps.append((lambda f=f: self._sweep_store(f), 0))
-        self.sweep = Sequence(steps, self._sweep_done, collect=lambda m: self.sweep_collect.append(
-            m["amp"] * np.exp(1j * math.radians(m["ph"]))))
-        self.btn_sweep.setText("Abort sweep")
-        self.sweep_label.setText("running: %d frequencies" % len(freqs))
+        self.sweep = Sequence(steps, self._sweep_done, collect=self._sweep_collect)
+        self.update_sweep_buttons()
+        self.sweep_label.setText("%s: %d frequencies" % ("recording " + record[0] if record else "running",
+                                                         len(freqs)))
         self.tabs.setCurrentIndex(3)
-        self.log("sweep started: %.1f Hz .. %.1f Hz, %d steps" % (freqs[0], freqs[-1], len(freqs)))
+        self.log("sweep %s: %.1f Hz .. %.1f Hz, %d steps" % (
+            "recording to " + record[1] if record else "started", freqs[0], freqs[-1], len(freqs)))
         self.sweep.start()
+        return True
 
     def _sweep_set_freq(self, f):
         self.freq_spin.blockSignals(True)
         self.freq_spin.setValue(f)
         self.freq_spin.blockSignals(False)
-        self.set_mod_freq(*pa_limits.snap_frequency(f))
+        p, f_actual = pa_limits.snap_frequency(f)
+        self.set_mod_freq(p, f_actual)
+        self.sweep_stale = 0
         self.dev.send("set freq %.4f" % f)
-        self.sweep_label.setText("measuring %.1f Hz" % f)
+        if self.record is not None:
+            self.record.new_step(f, f_actual, p)
+        self.sweep_label.setText("%s %.1f Hz" % ("recording" if self.record is not None else "measuring", f))
+
+    def _sweep_at_freq(self, m, f):
+        """True for a block the firmware made at the step's frequency. Blocks still queued from the previous
+        step are skipped; if the device never reports the new frequency the sweep stops."""
+        if abs(m.get("freq", f) - pa_limits.snap_frequency(f)[1]) <= 1e-3:
+            return True
+        self.sweep_stale += 1
+        if self.sweep_stale == 50:
+            QTimer.singleShot(0, lambda: self.abort_sweep(
+                "the device still reports %.1f Hz instead of %.1f Hz" % (m.get("freq", 0.0), f)))
+        return False
+
+    def _sweep_begin_average(self):
+        """The step has settled: average (and record) the next blocks."""
+        self.sweep_collect.clear()
+        if self.record is not None:
+            self.record.begin_average()
+
+    def _sweep_collect(self, m):
+        self.sweep_collect.append(m["amp"] * np.exp(1j * math.radians(m["ph"])))
+        if self.record is not None:
+            self.record.add_block(m)
 
     def _sweep_store(self, f):
         if self.sweep_collect:
@@ -1063,11 +1247,13 @@ class MainWindow(QMainWindow):
 
     def _sweep_done(self):
         self.sweep = None
-        self.btn_sweep.setText("Run sweep")
         if self.sweep_result:
             best = max(self.sweep_result, key=lambda r: r[1])
             self.sweep_label.setText("done. max %.1f dBFS at %.1f Hz" % (pa_limits.dbfs(best[1]), best[0]))
             self.log("sweep done: maximum %.1f dBFS at %.1f Hz" % (pa_limits.dbfs(best[1]), best[0]))
+        if self.record is not None:
+            self.finish_record("complete")
+        self.update_sweep_buttons()
         if self.sweep_freq_backup:
             self.restore_sweep_freq()
 
@@ -1081,15 +1267,60 @@ class MainWindow(QMainWindow):
         if self.sweep:
             self.sweep.abort()
         self.sweep = None
-        self.btn_sweep.setText("Run sweep")
         self.sweep_label.setText("aborted: " + why)
+        if self.record is not None:
+            self.finish_record("aborted: " + why)
+        self.update_sweep_buttons()
         if self.sweep_freq_backup and self.dev.is_open():
             self.restore_sweep_freq()
+
+    def finish_record(self, status):
+        """End the record and save it a moment later, when the last block's raw samples have arrived."""
+        rec = self.record
+        if rec is None or rec.finished:
+            return
+        rec.finish(status)
+        if self.dev.is_open():
+            self.dev.send("status")             # device status at the end, for the header
+        QTimer.singleShot(RECORD_WRITE_DELAY_MS, lambda: self.write_record(rec))
+
+    def write_record(self, rec):
+        if rec.written:
+            return
+        path = rec.path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            rec.write(path)
+        except OSError as e:
+            self.log("could not save the record %s: %s" % (path, e), "#c62828")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Could not save %s (%s): save the record elsewhere" % (os.path.basename(path), e),
+                os.path.join(os.path.expanduser("~"), os.path.basename(path)), "Text (*.txt)")
+            try:
+                if path:
+                    rec.write(path)
+            except OSError as e2:
+                QMessageBox.critical(self, "Record sweep", "Could not save the record:\n%s" % e2)
+        if rec.written:
+            blocks = rec.blocks()
+            missing = rec.missing_samples()
+            self.log("sweep recorded (%s): %s, %d frequencies, %d blocks, %.1f MB" % (
+                rec.status, rec.written, len({k for k, _ in blocks}), len(blocks),
+                os.path.getsize(rec.written) / 1e6), "#2e7d32" if rec.status == "complete" else "#ef6c00")
+            if missing:
+                self.log("%d block(s) have no raw samples (dropped on the USB link); the file says which"
+                         % len(missing), "#ef6c00")
+            self.sweep_label.setText(self.sweep_label.text() + "\nsaved as %s" % os.path.basename(rec.written))
+            self.statusBar().showMessage("Sweep recorded: %s" % rec.written, 15000)
+        if self.record is rec:
+            self.record = None
+        self.update_sweep_buttons()
 
     def export_sweep(self):
         if not self.sweep_result:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "Export sweep", "sweep.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export sweep", os.path.join(self.data_dir, "sweep.csv"),
+                                              "CSV (*.csv)")
         if not path:
             return
         with open(path, "w", newline="") as fh:
@@ -1302,6 +1533,13 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- shutdown --
     def closeEvent(self, ev):
+        rec = self.record
+        if rec is not None:                     # never lose a recording: save what there is now
+            if self.sweep:
+                self.sweep.abort()
+                self.sweep = None
+            rec.finish("aborted: window closed")
+            self.write_record(rec)
         try:
             self.set_light(False)
             time.sleep(0.1)
@@ -1314,6 +1552,9 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if "--sim" in sys.argv:
+        pa_sim.enable()
+        sys.argv = [a for a in sys.argv if a != "--sim"]
     if "--check" in sys.argv:
         # start-up check used by the launchers and the packaged build: build the
         # window off-screen, report the versions and exit
@@ -1321,9 +1562,10 @@ def main():
         from PySide6 import __version__ as pyside_version
         app = QApplication([a for a in sys.argv if a != "--check"])
         win = MainWindow()
-        msg = "GUI check ok: Python %d.%d, PySide6 %s, pyqtgraph %s, numpy %s, %d serial port(s)" % (
-            sys.version_info[0], sys.version_info[1], pyside_version, pg.__version__, np.__version__,
-            len(list_ports()))
+        msg = ("GUI %s check ok: Python %d.%d, PySide6 %s, pyqtgraph %s, numpy %s, %d serial port(s), "
+               "data folder %s") % (
+            GUI_VERSION, sys.version_info[0], sys.version_info[1], pyside_version, pg.__version__,
+            np.__version__, len(list_ports()), win.data_dir)
         if sys.stdout:                  # None in a windowed (PyInstaller) build
             print(msg)
         win.close()

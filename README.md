@@ -66,6 +66,13 @@ Manual alternative with any python.org Python 3.10+:
 `python pc-gui/pa_gui.py --check` builds the window off-screen and reports
 the versions, useful to verify an installation.
 
+**Without the detector:** start the GUI with `--sim`
+(`PhotoacousticDetector.exe --sim`, `pc-gui\run_gui.bat --sim` or
+`python pc-gui/pa_gui.py --sim`). The port list then offers
+`SIM  simulated detector (no hardware)`: a simulated board that speaks the
+firmware's protocol and answers like a cell with a resonance at 3 kHz. Use it
+to learn the GUI or to try a recorded sweep.
+
 ### 4. First measurement
 
 1. Choose the port marked `[pa-detector]` and press **Connect**. The console
@@ -93,10 +100,18 @@ the versions, useful to verify an installation.
    closing the GUI or unplugging the USB cable.
 6. **Sweep** tab, **Frequency sweep (find cell resonance)**: from/to
    frequency, number of points, log spacing, settle and average blocks,
-   **Run sweep**, **Export sweep CSV**.
-7. **Logging**: **Start logging** writes one CSV row per block with the
-   full settings context. **Save config** / **Load config** keep the GUI
-   settings.
+   **Run sweep**, **Export sweep CSV**. **Record sweep...** asks for a name,
+   runs the sweep and saves everything in one file, `<name>.txt`, in the
+   data folder (see "Recorded sweeps" below). Switch **Modulation ON**
+   first; otherwise the GUI asks whether you mean a dark sweep. At each
+   frequency the sweep waits until the board reports the new frequency,
+   lets the cell settle for the given number of blocks and then averages.
+7. **Data and logging**: the data folder is `photoacoustic-data`, created
+   where the GUI is started: next to `PhotoacousticDetector.exe`, or in the
+   current folder when run from source (in Documents when that folder is
+   read-only). **Open** shows it. **Start logging** writes one CSV row per
+   block with the full settings context. **Save config** / **Load config**
+   keep the GUI settings.
 8. Units: dBFS (sine peak relative to the ADC full scale) or mPa, using the
    **Calibration** fields (microphone -38 dBV/Pa, ADC 2 Vrms full scale at
    0 dB gain).
@@ -131,6 +146,35 @@ odd harmonics, phase spread between light cycles), the spectra, and a
   pointed at the microphone, 12 dB gain): -97 dBFS at 500 Hz falling to
   -112 dBFS at 3.3 kHz, 28 to 35 dB above the noise in 0.2 Hz bins, phase
   repeatable within 0.6 to 2.7 degrees over three light cycles.
+
+## Recorded sweeps
+
+**Record sweep...** saves one tab-separated text file,
+`photoacoustic-data/<name>.txt`:
+
+| Part | Content |
+|---|---|
+| `# key: value` header | the record (start, end, `status: complete` or `aborted: <why>`, counts, the maximum), software, device (port and every field the firmware reports about itself), sweep and measurement settings, calibration, definitions, the device status at the start and at the end, all GUI settings, and the meaning of every column |
+| `[analysed]` | one row per frequency: amplitude of the vector average (fraction of full scale, dBFS, dB relative to the sweep's maximum, mPa peak) and its phase, their standard errors, gain, light, overloads |
+| `[blocks]` | every 100 ms block that went into the average: the firmware's lock-in values, level and flags, and the lock-in reference phase of its first sample |
+| `[samples]` | the raw microphone samples of each of those blocks, 4800 int16 values per row (divide by 32768 for a fraction of full scale) |
+
+The default sweep (50 frequencies x 10 blocks) gives about 7 MB. The blocks
+seen while a frequency settles are not in the file. If the window is closed
+or the cable pulled during a recorded sweep, what was measured is saved with
+an `aborted` status; a block whose raw samples were lost on the USB link is
+marked in `[blocks]` and counted in the header.
+
+A spreadsheet opens the tables after you delete the other sections. In
+Python:
+
+```
+import sys; sys.path.insert(0, "pc-gui")
+import pa_record
+r = pa_record.read_record("photoacoustic-data/leaf A.txt")
+f, amp, ph = r["analysed"]["f_hz"], r["analysed"]["amp_fs"], r["analysed"]["phase_deg"]
+x = r["samples"][r["blocks"]["seq"][0]] / 32768      # raw samples of the first block
+```
 
 ## Updating the firmware
 
@@ -194,13 +238,23 @@ project in `kicad/` still shows 1 uF.
 
 ## Making a release (maintainers)
 
-`pc-gui\build_exe.bat` builds the standalone Windows GUI with PyInstaller
-into `pc-gui\dist\PhotoacousticDetector\` and zips it as
+Before a release, run the GUI test, which needs no hardware: it drives the
+real GUI off-screen against the simulated detector, records sweeps and checks
+the files (exit code 0 = pass, about 10 s):
+
+```
+pc-gui\.venv\Scripts\python.exe pc-gui\test_record.py
+```
+
+The GUI version is `GUI_VERSION` in `pc-gui/pa_gui.py`, the firmware version
+`FW_VERSION` in `firmware/src/board.h`. `pc-gui\build_exe.bat` builds the
+standalone Windows GUI with PyInstaller into
+`pc-gui\dist\PhotoacousticDetector\` and zips it as
 `pc-gui\dist\PhotoacousticDetector-windows.zip` (firmware image and README
 included). Publish it together with the firmware image:
 
 ```
-gh release create v1.0.1 pc-gui/dist/PhotoacousticDetector-windows.zip firmware/release/pa_detector-1.0.1.uf2
+gh release create v1.1.0 pc-gui/dist/PhotoacousticDetector-windows.zip firmware/release/pa_detector-1.0.1.uf2
 ```
 
 ## Legacy
