@@ -2,7 +2,7 @@
 
 A photoacoustic detector built from a TLV320ADC6120 audio-ADC shield on a
 Raspberry Pi Pico (RP2040), an IM73A135 MEMS microphone and an on/off
-current source driving a 1900 nm LED (Ushio SMBB1900D-1100-02). The Pico
+current source driving a LED. The Pico
 switches the LED with a square wave between 200 Hz and 10 kHz, computes the
 lock-in amplitude and phase of the microphone signal at that frequency and
 streams the raw samples; the PC shows the FFT, the lock-in result and
